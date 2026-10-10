@@ -15,40 +15,64 @@ st.set_page_config(
 
 st.title('⚡ Bitcoin (BTC) 15-Minuten Scalping Quant Model')
 st.markdown(
-    'Dit dashboard haalt live **15-minuten candles** op via Binance, berekent'
-    ' technische indicatoren en voorspelt met XGBoost de exacte prijs over'
-    ' **15 minuten**.'
+    'Dit geavanceerde 15-minuten dashboard combineert **Binance orderflow**'
+    ' (Taker Buy Ratio), **VWAP**, **Bollinger Bands %B**, **ATR** en'
+    ' **technische indicatoren** om de prijs over 15 minuten te voorspellen.'
 )
 
 
 # --- 15-MINUTEN DATA OPHAAL VIA BINANCE API ---
-@st.cache_data(ttl=300)  # Cache vernieuwen elke 5 minuten
+@st.cache_data(ttl=300)
 def load_binance_15m_data(symbol='BTCUSDT'):
   try:
-    # Binance endpoint voor klines (candles), limit = 1000 candles (ongeveer 10 dagen aan 15m data)
     url = f'https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=1000'
     response = requests.get(url, timeout=10)
     data = response.json()
 
-    # Structuur van Binance kline: [Open time, Open, High, Low, Close, Volume, Close time, ...]
-    df = pd.DataFrame(data, columns=[
-        'open_time', 'open', 'high', 'low', 'close', 'volume',
-        'close_time', 'quote_asset_volume', 'number_of_trades',
-        'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
-    ])
+    df = pd.DataFrame(
+        data,
+        columns=[
+            'open_time',
+            'open',
+            'high',
+            'low',
+            'close',
+            'volume',
+            'close_time',
+            'quote_asset_volume',
+            'number_of_trades',
+            'taker_buy_base_asset_volume',
+            'taker_buy_quote_asset_volume',
+            'ignore',
+        ],
+    )
 
     df['Date'] = pd.to_datetime(df['open_time'], unit='ms')
-    for col in ['open', 'high', 'low', 'close', 'volume']:
+    for col in [
+        'open',
+        'high',
+        'low',
+        'close',
+        'volume',
+        'taker_buy_base_asset_volume',
+    ]:
       df[col] = df[col].astype(float)
 
-    df = df[['Date', 'open', 'high', 'low', 'close', 'volume']]
+    df = df[[
+        'Date',
+        'open',
+        'high',
+        'low',
+        'close',
+        'volume',
+        'taker_buy_base_asset_volume',
+    ]]
     return df
   except Exception as e:
     st.error(f'Fout bij ophalen van Binance data: {e}')
     return None
 
 
-# 100% Realtime actuele prijs
 def fetch_realtime_binance_price(symbol='BTCUSDT'):
   try:
     url = f'https://api.binance.com/api/v3/ticker/price?symbol={symbol}'
@@ -61,10 +85,37 @@ def fetch_realtime_binance_price(symbol='BTCUSDT'):
   return None
 
 
-def add_technical_indicators(df):
-  # Snellere periodes voor 15m grafieken
-  df['SMA_20'] = df['close'].rolling(window=20).mean()
-  df['SMA_50'] = df['close'].rolling(window=50).mean()
+def add_advanced_indicators(df):
+  # 1. Taker Buy Ratio (Koopdruk vs Verkoopdruk)
+  df['taker_buy_ratio'] = df['taker_buy_base_asset_volume'] / (
+      df['volume'] + 1e-8
+  )
+
+  # 2. VWAP (Volume Weighted Average Price) - Rollend over 96 candles (= 24 uur op 15m)
+  typical_price = (df['high'] + df['low'] + df['close']) / 3
+  df['VWAP'] = (typical_price * df['volume']).rolling(window=96).sum() / (
+      df['volume'].rolling(window=96).sum() + 1e-8
+  )
+  df['VWAP_distance'] = (df['close'] - df['VWAP']) / (df['VWAP'] + 1e-8)
+
+  # 3. Bollinger Bands %B (Intraday positie in de banden)
+  sma_20 = df['close'].rolling(window=20).mean()
+  std_20 = df['close'].rolling(window=20).std()
+  upper_band = sma_20 + (std_20 * 2)
+  lower_band = sma_20 - (std_20 * 2)
+  df['BB_pct_b'] = (df['close'] - lower_band) / (
+      upper_band - lower_band + 1e-8
+  )
+
+  # 4. ATR (Average True Range) voor volatiliteit
+  high_low = df['high'] - df['low']
+  high_close = np.abs(df['high'] - df['close'].shift())
+  low_close = np.abs(df['low'] - df['close'].shift())
+  true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+  df['ATR'] = true_range.rolling(window=14).mean()
+
+  # 5. Klassieke indicatoren
+  df['SMA_20'] = sma_20
   df['EMA_9'] = df['close'].ewm(span=9, adjust=False).mean()
   df['EMA_21'] = df['close'].ewm(span=21, adjust=False).mean()
   df['MACD'] = df['EMA_9'] - df['EMA_21']
@@ -77,6 +128,7 @@ def add_technical_indicators(df):
   avg_loss = loss.rolling(window=14).mean()
   rs = avg_gain / avg_loss
   df['RSI'] = 100 - (100 / (1 + rs))
+
   return df
 
 
@@ -92,15 +144,15 @@ def fetch_crypto_fear_greed():
 
 
 # --- DATA LADEN EN SAMENVOEGEN ---
-with st.spinner('Bezig met ophalen van 15-minuten Binance candles...'):
+with st.spinner('Bezig met ophalen en berekenen van 15m orderflow data...'):
   df = load_binance_15m_data('BTCUSDT')
 
   if df is not None and not df.empty:
-    df = add_technical_indicators(df)
+    df = add_advanced_indicators(df)
     current_fng = fetch_crypto_fear_greed()
     df['fear_greed'] = current_fng
 
-    # Target: Sluitingsprijs van de *volgende* 15-minuten candle
+    # Target: Sluitingsprijs over 15 minuten
     df['Target'] = df['close'].shift(-1)
     df = df.dropna().reset_index(drop=True)
   else:
@@ -122,8 +174,11 @@ features = [
     'high',
     'low',
     'volume',
+    'taker_buy_ratio',
+    'VWAP_distance',
+    'BB_pct_b',
+    'ATR',
     'SMA_20',
-    'SMA_50',
     'EMA_9',
     'EMA_21',
     'MACD',
@@ -153,12 +208,14 @@ current_price = realtime_price if realtime_price else float(df['close'].iloc[-1]
 col1, col2, col3 = st.columns(3)
 col1.metric('Huidige BTC Koers (Live)', f'${current_price:,.2f}')
 col2.metric('Model Score ($R^2$ op 15m)', f'{score:.2f}')
-col3.metric('Laatste 15m RSI', f"{df['RSI'].iloc[-1]:.2f}")
+col3.metric(
+    'Laatste Taker Buy Ratio', f"{df['taker_buy_ratio'].iloc[-1]:.3f}"
+)
 
 st.markdown('---')
 
-st.subheader('📊 Laatste 15-Minuten Candles & EMA Koerslijn')
-st.line_chart(df.tail(100).set_index('Date')[['close', 'EMA_9', 'EMA_21']])
+st.subheader('📊 Laatste 15-Minuten Candles & VWAP Afstand')
+st.line_chart(df.tail(100).set_index('Date')[['close', 'VWAP']])
 
 st.subheader('🔍 Belangrijkste factoren voor de 15m voorspelling')
 importances = pd.Series(model.feature_importances_, index=features).sort_values(
@@ -194,6 +251,7 @@ else:
   )
 
 st.info(
-    '💡 *Dit scalping-model gebruikt rechtstreekse 15-minuten Binance candles'
-    ' en snelle EMA/RSI indicatoren om kortetermijnbewegingen te voorspellen.*'
+    '💡 *Dit scalping-model gebruikt orderflow (Taker Buy Ratio), VWAP-afwijkingen'
+    ' en Bollinger Bands om nauwkeurig de koersrichting over 15 minuten te'
+    ' voorspellen.*'
 )
