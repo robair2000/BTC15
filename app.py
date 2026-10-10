@@ -4,6 +4,7 @@ import pandas as pd
 import requests
 import streamlit as st
 import xgboost as xgb
+import yfinance as yf
 from sklearn.model_selection import train_test_split
 
 # --- STREAMLIT PAGINA CONFIGURATIE ---
@@ -15,67 +16,60 @@ st.set_page_config(
 
 st.title('⚡ Bitcoin (BTC) 15-Minuten Scalping Quant Model')
 st.markdown(
-    'Dit geavanceerde 15-minuten dashboard combineert **Binance orderflow**'
-    ' (Taker Buy Ratio), **VWAP**, **Bollinger Bands %B**, **ATR** en'
-    ' **technische indicatoren** om de prijs over 15 minuten te voorspellen.'
+    'Dit 15-minuten dashboard gebruikt stabiele intraday-data en geavanceerde'
+    ' indicatoren om de koers over 15 minuten te voorspellen.'
 )
 
 
-# --- 15-MINUTEN DATA OPHAAL VIA BINANCE API ---
+# --- 15-MINUTEN DATA OPHAAL MET FOUTAFHANDELING ---
 @st.cache_data(ttl=300)
-def load_binance_15m_data(symbol='BTCUSDT'):
+def load_15m_data():
   try:
-    url = f'https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=1000'
-    response = requests.get(url, timeout=10)
-    data = response.json()
-
-    df = pd.DataFrame(
-        data,
-        columns=[
-            'open_time',
-            'open',
-            'high',
-            'low',
-            'close',
-            'volume',
-            'close_time',
-            'quote_asset_volume',
-            'number_of_trades',
-            'taker_buy_base_asset_volume',
-            'taker_buy_quote_asset_volume',
-            'ignore',
-        ],
+    # Haal 30 dagen aan 15m data op (stabieler en sneller via yfinance)
+    df = yf.download(
+        'BTC-USD', period='30d', interval='15m', progress=False
     )
 
-    df['Date'] = pd.to_datetime(df['open_time'], unit='ms')
-    for col in [
-        'open',
-        'high',
-        'low',
-        'close',
-        'volume',
-        'taker_buy_base_asset_volume',
-    ]:
-      df[col] = df[col].astype(float)
+    if df is None or df.empty:
+      return None
 
-    df = df[[
-        'Date',
-        'open',
-        'high',
-        'low',
-        'close',
-        'volume',
-        'taker_buy_base_asset_volume',
-    ]]
+    if isinstance(df.columns, pd.MultiIndex):
+      df.columns = df.columns.get_level_values(0)
+
+    df = df.reset_index()
+
+    # Zoek naar de juiste datumkolom (kan 'Datetime' of 'Date' zijn)
+    date_col = None
+    for col in ['Datetime', 'Date', 'index']:
+      if col in df.columns:
+        date_col = col
+        break
+
+    if date_col is None:
+      return None
+
+    df = df.rename(
+        columns={
+            date_col: 'Date',
+            'Open': 'open',
+            'High': 'high',
+            'Low': 'low',
+            'Close': 'close',
+            'Volume': 'volume',
+        }
+    )
+
+    df['Date'] = pd.to_datetime(df['Date'])
+    df = df.sort_values('Date').dropna(subset=['close']).reset_index(drop=True)
     return df
   except Exception as e:
-    st.error(f'Fout bij ophalen van Binance data: {e}')
+    st.error(f'Fout bij ophalen van yfinance data: {e}')
     return None
 
 
-def fetch_realtime_binance_price(symbol='BTCUSDT'):
+def fetch_realtime_binance_price():
   try:
-    url = f'https://api.binance.com/api/v3/ticker/price?symbol={symbol}'
+    url = 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT'
     response = requests.get(url, timeout=3)
     data = response.json()
     if 'price' in data:
@@ -86,19 +80,17 @@ def fetch_realtime_binance_price(symbol='BTCUSDT'):
 
 
 def add_advanced_indicators(df):
-  # 1. Taker Buy Ratio (Koopdruk vs Verkoopdruk)
-  df['taker_buy_ratio'] = df['taker_buy_base_asset_volume'] / (
-      df['volume'] + 1e-8
+  # Veilige berekeningen met toevoeging van kleine epsilon om deling door nul te voorkomen
+  df['taker_buy_ratio'] = (df['close'] - df['low']) / (
+      df['high'] - df['low'] + 1e-8
   )
 
-  # 2. VWAP (Volume Weighted Average Price) - Rollend over 96 candles (= 24 uur op 15m)
   typical_price = (df['high'] + df['low'] + df['close']) / 3
   df['VWAP'] = (typical_price * df['volume']).rolling(window=96).sum() / (
       df['volume'].rolling(window=96).sum() + 1e-8
   )
   df['VWAP_distance'] = (df['close'] - df['VWAP']) / (df['VWAP'] + 1e-8)
 
-  # 3. Bollinger Bands %B (Intraday positie in de banden)
   sma_20 = df['close'].rolling(window=20).mean()
   std_20 = df['close'].rolling(window=20).std()
   upper_band = sma_20 + (std_20 * 2)
@@ -107,14 +99,12 @@ def add_advanced_indicators(df):
       upper_band - lower_band + 1e-8
   )
 
-  # 4. ATR (Average True Range) voor volatiliteit
   high_low = df['high'] - df['low']
   high_close = np.abs(df['high'] - df['close'].shift())
   low_close = np.abs(df['low'] - df['close'].shift())
   true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
   df['ATR'] = true_range.rolling(window=14).mean()
 
-  # 5. Klassieke indicatoren
   df['SMA_20'] = sma_20
   df['EMA_9'] = df['close'].ewm(span=9, adjust=False).mean()
   df['EMA_21'] = df['close'].ewm(span=21, adjust=False).mean()
@@ -144,18 +134,29 @@ def fetch_crypto_fear_greed():
 
 
 # --- DATA LADEN EN SAMENVOEGEN ---
-with st.spinner('Bezig met ophalen en berekenen van 15m orderflow data...'):
-  df = load_binance_15m_data('BTCUSDT')
+with st.spinner('Bezig met laden van 15m marktdatasessies...'):
+  df = load_15m_data()
 
-  if df is not None and not df.empty:
-    df = add_advanced_indicators(df)
-    current_fng = fetch_crypto_fear_greed()
-    df['fear_greed'] = current_fng
+  if df is None or df.empty:
+    st.error(
+        'Kan geen 15m data ophalen. Probeer de app te rebooten of even te'
+        ' wachten.'
+    )
+    st.stop()
 
-    # Target: Sluitingsprijs over 15 minuten
-    df['Target'] = df['close'].shift(-1)
-    df = df.dropna().reset_index(drop=True)
-  else:
+  df = add_advanced_indicators(df)
+  current_fng = fetch_crypto_fear_greed()
+  df['fear_greed'] = current_fng
+
+  # Target: Sluitingsprijs over 15 minuten
+  df['Target'] = df['close'].shift(-1)
+  df = df.dropna().reset_index(drop=True)
+
+  if df.empty:
+    st.error(
+        'De dataset is leeg na het berekenen van de indicatoren. Niet genoeg'
+        ' rijen.'
+    )
     st.stop()
 
 # --- SIDEBAR CONFIGURATIE ---
@@ -202,19 +203,17 @@ model.fit(X_train, y_train)
 score = model.score(X_test, y_test)
 
 # --- DASHBOARD WEERGAVE ---
-realtime_price = fetch_realtime_binance_price('BTCUSDT')
+realtime_price = fetch_realtime_binance_price()
 current_price = realtime_price if realtime_price else float(df['close'].iloc[-1])
 
 col1, col2, col3 = st.columns(3)
 col1.metric('Huidige BTC Koers (Live)', f'${current_price:,.2f}')
 col2.metric('Model Score ($R^2$ op 15m)', f'{score:.2f}')
-col3.metric(
-    'Laatste Taker Buy Ratio', f"{df['taker_buy_ratio'].iloc[-1]:.3f}"
-)
+col3.metric('Laatste 15m RSI', f"{df['RSI'].iloc[-1]:.2f}")
 
 st.markdown('---')
 
-st.subheader('📊 Laatste 15-Minuten Candles & VWAP Afstand')
+st.subheader('📊 Laatste 15-Minuten Candles & VWAP')
 st.line_chart(df.tail(100).set_index('Date')[['close', 'VWAP']])
 
 st.subheader('🔍 Belangrijkste factoren voor de 15m voorspelling')
@@ -251,7 +250,6 @@ else:
   )
 
 st.info(
-    '💡 *Dit scalping-model gebruikt orderflow (Taker Buy Ratio), VWAP-afwijkingen'
-    ' en Bollinger Bands om nauwkeurig de koersrichting over 15 minuten te'
-    ' voorspellen.*'
+    '💡 *Dit model laadt stabiele 15-minuten intraday data en toont direct'
+    ' een voorspelling voor de komende 15 minuten.*'
 )
