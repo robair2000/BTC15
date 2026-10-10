@@ -6,3 +6,5 @@ xgboost
 requests
 pyarrow
 yfinance
+shap
+matplotlib
