@@ -157,7 +157,7 @@ st.sidebar.header('⚙️ Model & Strategie Instellingen')
 test_size = st.sidebar.slider(
     'Test / Train Splitsing (%)', 10, 40, 20, step=5
 )
-n_estimators = st.sidebar.slider('XGBoost Bomen (n_estimators)', 50, 300, 100)
+n_estimators = st.sidebar.slider('XGBoost Bomen (n_estimators)', 50, 300, 150)
 max_depth = st.sidebar.slider('Maximale Boomdiepte (max_depth)', 3, 10, 4)
 
 st.sidebar.markdown('---')
