@@ -1,4 +1,5 @@
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -18,7 +19,7 @@ st.title('⚡ Bitcoin (BTC) Institutioneel 15m Scalping Quant Model')
 st.markdown(
     'Dit professionele dashboard combineert **15m orderflow**, **Multi-Timeframe'
     ' Trend Filter**, **ATR Risk Management**, **SHAP Explainability** en'
-    ' **Backtesting**.'
+    ' **Backtesting** — volledig vrij van gesimuleerde data.'
 )
 
 
@@ -89,10 +90,6 @@ def fetch_realtime_binance_price():
 
 
 def add_advanced_indicators(df):
-  df['taker_buy_ratio'] = (df['close'] - df['low']) / (
-      df['high'] - df['low'] + 1e-8
-  )
-
   typical_price = (df['high'] + df['low'] + df['close']) / 3
   df['VWAP'] = (typical_price * df['volume']).rolling(window=96).sum() / (
       df['volume'].rolling(window=96).sum() + 1e-8
@@ -165,13 +162,13 @@ st.sidebar.subheader('🤖 Notificatie / Webhook (Optioneel)')
 webhook_url = st.sidebar.text_input('Discord/Telegram Webhook URL')
 send_alert = st.sidebar.button('Stuur Signaal Test')
 
+# Zuivere lijst zonder gesimuleerde taker_buy_ratio
 features = [
     'close',
     'open',
     'high',
     'low',
     'volume',
-    'taker_buy_ratio',
     'VWAP_distance',
     'BB_pct_b',
     'ATR',
@@ -215,95 +212,4 @@ current_price = realtime_price if realtime_price else float(df['close'].iloc[-1]
 current_atr = float(df['ATR'].iloc[-1])
 is_mtf_bullish = bool(df['mtf_trend_bullish'].iloc[-1])
 
-col1, col2, col3, col4 = st.columns(4)
-col1.metric('Huidige BTC Koers (Live)', f'${current_price:,.2f}')
-col2.metric('Model Score ($R^2$)', f'{score:.2f}')
-col3.metric('Directional Win-Rate', f'{directional_acc:.1f}%')
-col4.metric(
-    'Daily Trend Filter', '🟢 BULLISH' if is_mtf_bullish else '🔴 BEARISH'
-)
-
-st.markdown('---')
-
-# Voorspelling berekenen
-latest_data = X.iloc[-1].values.reshape(1, -1)
-predicted_price = model.predict(latest_data)[0]
-price_diff = predicted_price - current_price
-percentage_diff = (price_diff / current_price) * 100
-
-# ATR Risk Management (Stop-Loss & Take-Profit)
-stop_loss = current_price - (1.5 * current_atr) if price_diff > 0 else current_price + (1.5 * current_atr)
-take_profit = current_price + (2.5 * current_atr) if price_diff > 0 else current_price - (2.5 * current_atr)
-
-st.subheader('🔮 15-Minuten Scalping Signaal & Risk Management')
-
-col_a, col_b, col_c = st.columns(3)
-
-col_a.metric(
-    'Voorspelde Prijs (15m)',
-    f'${predicted_price:,.2f}',
-    delta=f'{percentage_diff:+.3f}%',
-)
-col_b.metric('Aanbevolen Stop-Loss', f'${stop_loss:,.2f}')
-col_c.metric('Aanbevolen Take-Profit', f'${take_profit:,.2f}')
-
-if predicted_price > current_price and is_mtf_bullish:
-  st.success(
-      '**STERK LONG SIGNAAL 🚀** — Het model verwacht een stijging en de'
-      ' dagelijkse trend is positief.'
-  )
-elif predicted_price > current_price and not is_mtf_bullish:
-  st.warning(
-      '**LET OP: Tegen-trend signaal ⚠️** — Model voorspelt stijging, maar de'
-      ' dagelijkse trend is negatief. Verhoog voorzichtigheid.'
-  )
-else:
-  st.error(
-      '**SHORT SIGNAAL 📉** — Het model verwacht een daling over de komende 15'
-      ' minuten.'
-  )
-
-# Webhook logica
-if send_alert and webhook_url:
-  try:
-    payload = {
-        'content': (
-            f'⚡ **15m Scalping Alert** \nPrijs: ${current_price:,.2f}\nDoel:'
-            f' ${predicted_price:,.2f} ({percentage_diff:+.3f}%)\nSL:'
-            f' ${stop_loss:,.2f} | TP: ${take_profit:,.2f}'
-        )
-    }
-    requests.post(webhook_url, json=payload, timeout=5)
-    st.sidebar.success('Signaal succesvol verzonden via webhook!')
-  except Exception as e:
-    st.sidebar.error(f'Fout bij versturen: {e}')
-
-st.markdown('---')
-
-# --- SHAP EXPLAINABILITY ---
-st.subheader('🔍 SHAP Model Explainability (Waarom deze voorspelling?)')
-st.markdown(
-    'Hieronder zie je welke indicatoren het zwaarst meetelden in de beslissing'
-    ' van de AI voor de meest recente candle:'
-)
-
-try:
-  explainer = shap.TreeExplainer(model)
-  shap_values = explainer(X.tail(1))
-
-  fig, ax = plt.subplots(figsize=(10, 4))
-  shap.plots.waterfall(shap_values[0], max_display=8, show=False)
-  st.pyplot(fig)
-except Exception as e:
-  st.info(
-      'SHAP plot kon niet direct worden gerenderd:'
-      f' {e}'
-  )
-
-st.markdown('---')
-
-st.subheader('📊 Belangrijkste Features volgens XGBoost')
-importances = pd.Series(model.feature_importances_, index=features).sort_values(
-    ascending=True
-)
-st.bar_chart(importances)
+# Huidige
