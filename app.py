@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import requests
-import shap
 import streamlit as st
 import xgboost as xgb
 import yfinance as yf
@@ -27,7 +26,6 @@ st.markdown(
 @st.cache_data(ttl=300)
 def load_market_data():
   try:
-    # 15m data voor scalping
     df = yf.download(
         'BTC-USD', period='30d', interval='15m', progress=False
     )
@@ -51,7 +49,6 @@ def load_market_data():
     df['Date'] = pd.to_datetime(df['Date'])
     df = df.sort_values('Date').dropna(subset=['close']).reset_index(drop=True)
 
-    # Daily data voor Multi-Timeframe Trend Filter
     df_daily = yf.download(
         'BTC-USD', period='60d', interval='1d', progress=False
     )
@@ -63,7 +60,6 @@ def load_market_data():
     df_daily['Date'] = pd.to_datetime(df_daily['Date'])
     df_daily['daily_SMA50'] = df_daily['daily_close'].rolling(window=50).mean()
 
-    # Merge daily trend into 15m df based on date
     df['Date_only'] = df['Date'].dt.date
     df_daily['Date_only'] = df_daily['Date'].dt.date
     df = pd.merge(
@@ -122,9 +118,7 @@ def add_advanced_indicators(df):
   rs = gain.rolling(window=14).mean() / loss.rolling(window=14).mean()
   df['RSI'] = 100 - (100 / (1 + rs))
 
-  # Multi-Timeframe Trend Filter (1 = Bullish, 0 = Bearish)
   df['mtf_trend_bullish'] = (df['daily_close'] > df['daily_SMA50']).astype(int)
-
   return df
 
 
@@ -141,7 +135,7 @@ def fetch_crypto_fear_greed():
 with st.spinner('Laden van marktdata en berekenen van quant features...'):
   df = load_market_data()
   if df is None or df.empty:
-    st.error('Kon geen data laden.')
+    st.error('Kon geen data laden via Yahoo Finance. Probeer het over een minuutje opnieuw.')
     st.stop()
 
   df = add_advanced_indicators(df)
@@ -151,9 +145,7 @@ with st.spinner('Laden van marktdata en berekenen van quant features...'):
 
 # --- SIDEBAR CONFIGURATIE ---
 st.sidebar.header('⚙️ Model & Strategie Instellingen')
-test_size = st.sidebar.slider(
-    'Test / Train Splitsing (%)', 10, 40, 20, step=5
-)
+test_size = st.sidebar.slider('Test / Train Splitsing (%)', 10, 40, 20, step=5)
 n_estimators = st.sidebar.slider('XGBoost Bomen (n_estimators)', 50, 300, 150)
 max_depth = st.sidebar.slider('Maximale Boomdiepte (max_depth)', 3, 10, 4)
 
@@ -162,7 +154,6 @@ st.sidebar.subheader('🤖 Notificatie / Webhook (Optioneel)')
 webhook_url = st.sidebar.text_input('Discord/Telegram Webhook URL')
 send_alert = st.sidebar.button('Stuur Signaal Test')
 
-# Zuivere lijst zonder gesimuleerde taker_buy_ratio
 features = [
     'close',
     'open',
@@ -201,7 +192,6 @@ test_preds = model.predict(X_test)
 test_actuals = y_test.values
 test_closes = X_test['close'].values
 
-# Directional Accuracy (Aantal keren dat richting goed is voorspeld)
 pred_direction = np.sign(test_preds - test_closes)
 actual_direction = np.sign(test_actuals - test_closes)
 directional_acc = np.mean(pred_direction == actual_direction) * 100
@@ -212,4 +202,97 @@ current_price = realtime_price if realtime_price else float(df['close'].iloc[-1]
 current_atr = float(df['ATR'].iloc[-1])
 is_mtf_bullish = bool(df['mtf_trend_bullish'].iloc[-1])
 
-# Huidige
+brussels_tz = ZoneInfo('Europe/Brussels')
+laatste_update = datetime.now(brussels_tz).strftime('%H:%M:%S (%d-%m-%Y)')
+
+col1, col2, col3, col4, col5 = st.columns(5)
+col1.metric('Huidige BTC Koers (Live)', f'${current_price:,.2f}')
+col2.metric('Model Score ($R^2$)', f'{score:.2f}')
+col3.metric('Directional Win-Rate', f'{directional_acc:.1f}%')
+col4.metric(
+    'Daily Trend Filter', '🟢 BULLISH' if is_mtf_bullish else '🔴 BEARISH'
+)
+col5.metric('Laatste Call (Brussel)', laatste_update)
+
+st.markdown('---')
+
+latest_data = X.iloc[-1].values.reshape(1, -1)
+predicted_price = model.predict(latest_data)[0]
+price_diff = predicted_price - current_price
+percentage_diff = (price_diff / current_price) * 100
+
+stop_loss = (
+    current_price - (1.5 * current_atr)
+    if price_diff > 0
+    else current_price + (1.5 * current_atr)
+)
+take_profit = (
+    current_price + (2.5 * current_atr)
+    if price_diff > 0
+    else current_price - (2.5 * current_atr)
+)
+
+st.subheader('🔮 15-Minuten Scalping Signaal & Risk Management')
+
+col_a, col_b, col_c = st.columns(3)
+col_a.metric(
+    'Voorspelde Prijs (15m)',
+    f'${predicted_price:,.2f}',
+    delta=f'{percentage_diff:+.3f}%',
+)
+col_b.metric('Aanbevolen Stop-Loss', f'${stop_loss:,.2f}')
+col_c.metric('Aanbevolen Take-Profit', f'${take_profit:,.2f}')
+
+if predicted_price > current_price and is_mtf_bullish:
+  st.success(
+      '**STERK LONG SIGNAAL 🚀** — Het model verwacht een stijging en de'
+      ' dagelijkse trend is positief.'
+  )
+elif predicted_price > current_price and not is_mtf_bullish:
+  st.warning(
+      '**LET OP: Tegen-trend signaal ⚠️** — Model voorspelt stijging, maar de'
+      ' dagelijkse trend is negatief. Verhoog voorzichtigheid.'
+  )
+else:
+  st.error(
+      '**SHORT SIGNAAL 📉** — Het model verwacht een daling over de komende 15'
+      ' minuten.'
+  )
+
+if send_alert and webhook_url:
+  try:
+    payload = {
+        'content': (
+            f'⚡ **15m Scalping Alert** \nPrijs: ${current_price:,.2f}\nDoel:'
+            f' ${predicted_price:,.2f} ({percentage_diff:+.3f}%)\nSL:'
+            f' ${stop_loss:,.2f} | TP: ${take_profit:,.2f}'
+        )
+    }
+    requests.post(webhook_url, json=payload, timeout=5)
+    st.sidebar.success('Signaal succesvol verzonden via webhook!')
+  except Exception as e:
+    st.sidebar.error(f'Fout bij versturen: {e}')
+
+st.markdown('---')
+
+# --- SHAP EXPLAINABILITY (Veilig ingepakt) ---
+st.subheader('🔍 SHAP Model Explainability (Waarom deze voorspelling?)')
+try:
+  import shap
+  explainer = shap.TreeExplainer(model)
+  shap_values = explainer(X.tail(1))
+
+  fig, ax = plt.subplots(figsize=(10, 4))
+  shap.plots.waterfall(shap_values[0], max_display=8, show=False)
+  st.pyplot(fig)
+  plt.close(fig)
+except Exception as e:
+  st.info('SHAP-uitleg kon tijdelijk niet worden geladen (geen impact op model).')
+
+st.markdown('---')
+
+st.subheader('📊 Belangrijkste Features volgens XGBoost')
+importances = pd.Series(model.feature_importances_, index=features).sort_values(
+    ascending=True
+)
+st.bar_chart(importances)
